@@ -1,54 +1,94 @@
-# FBX2glTF
+# fbx2.1glb
 
-> [!NOTE]
->
-> As of Godot 4.3, FBX2glTF is no longer used. The engine now relies on
-> [ufbx](https://github.com/ufbx/ufbx) instead, which is a built-in library
-> instead of an external command-line tool.
->
-> As such, **in Godot 4.3 or later, you no longer need to set up FBX2glTF**
-> to import FBX scenes.
->
-> We no longer actively maintain this repository as we won't be needing it
-> going forward. If you want to build on top of it for your own use cases,
-> feel free to fork it.
+FBX to glTF/GLB command-line converter — **no Autodesk FBX SDK required**.
 
-A command-line tool for the conversion of 3D model assets on the FBX file format
-to the glTF file format.
+Forked from [godotengine/FBX2glTF](https://github.com/godotengine/FBX2glTF) (which itself is a fork of [facebookincubator/FBX2glTF](https://github.com/facebookincubator/FBX2glTF)). The proprietary Autodesk FBX SDK has been completely replaced with [ufbx](https://github.com/ufbx/ufbx), a MIT-licensed single-file C99 FBX parser.
 
-This is a fork of [facebookincubator/FBX2glTF](https://github.com/facebookincubator/FBX2glTF)
-to fix issues for the needs of [Godot Engine](https://godotengine.org/).
+## Why this fork?
 
-Change skinning-weights to 4 with `--skinning-weights 4`, if your engine does not support the 8 bone weights feature.
+The original FBX2glTF depends on the Autodesk FBX SDK, which:
 
-Change the default import of the engine to be different from 30 fps if needed, with `--anim-framerate (bake24|bake30|bake60)`.
+- Has **no ARM64 (Apple Silicon) support** — requires Rosetta 2 on macOS
+- Is **proprietary** — cannot be freely redistributed
+- Requires a **separate SDK download** and license agreement
+
+This fork uses **ufbx** instead, enabling:
+
+- **ARM64-native builds** on Apple Silicon and Linux ARM64
+- **Fully open-source** — MIT/BSD, no proprietary dependencies
+- **Single-step build** — no SDK downloads needed
+- **C++17 standard library** — removed Boost dependency
+
+## Features
+
+- Mesh geometry (positions, normals, tangents, UVs, vertex colors)
+- PBR metallic-roughness and traditional (Lambert/Phong) materials
+- Embedded textures
+- Skeletal skinning (bone weights, inverse bind matrices)
+- Blend shapes / morph targets (with sparse accessor support)
+- Lights (directional, point, spot) via KHR_lights_punctual
+- Cameras (perspective, orthographic)
+- Animation baking (24/30/60 fps)
+- Draco mesh compression (optional)
+- Binary (.glb) and JSON (.gltf) output
+
+## Build
+
+```bash
+# Prerequisites: CMake 3.16+, C++17 compiler
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+
+# Binary at: build/fbx2glb
+```
+
+## Usage
+
+```bash
+# FBX to GLB (binary)
+./build/fbx2glb -b -i model.fbx -o output
+
+# FBX to glTF (JSON + separate files)
+./build/fbx2glb -i model.fbx -o output
+
+# With Draco compression
+./build/fbx2glb -b --draco -i model.fbx -o output
+
+# Verbose output
+./build/fbx2glb -b -v -i model.fbx -o output
+```
+
+### Options
+
+| Flag | Description |
+|------|-------------|
+| `-b, --binary` | Output binary .glb |
+| `-v, --verbose` | Verbose logging |
+| `-i, --input` | Input FBX file |
+| `-o, --output` | Output path (without extension) |
+| `--draco` | Enable Draco mesh compression |
+| `--compute-normals` | `never\|broken\|missing\|always` |
+| `--anim-framerate` | `bake24\|bake30\|bake60` |
+| `--skinning-weights N` | Max bone influences per vertex (default: 8) |
+| `--blend-shape-normals` | Include blend shape normals |
+| `--no-khr-lights-punctual` | Disable light export |
+
+## Dependencies
+
+All vendored in `third_party/` — no external downloads needed:
+
+| Library | License | Purpose |
+|---------|---------|---------|
+| [ufbx](https://github.com/ufbx/ufbx) | MIT / Public Domain | FBX parsing |
+| [draco](https://github.com/google/draco) | Apache 2.0 | Mesh compression (fetched by CMake) |
+| [fmt](https://github.com/fmtlib/fmt) | MIT | String formatting (fetched by CMake) |
+| [mathfu](https://github.com/google/mathfu) | Apache 2.0 | Math types |
+| [stb_image](https://github.com/nothings/stb) | MIT / Public Domain | Image I/O |
+| [nlohmann/json](https://github.com/nlohmann/json) | MIT | JSON serialization |
+| [CLI11](https://github.com/CLIUtils/CLI11) | BSD | Argument parsing |
 
 ## License
 
-The FBX2glTF command line tool is distributed under the 3-clause BSD license.
+BSD 3-Clause License. See [LICENSE](LICENSE).
 
-Precompiled binaries include **proprietary code** from the Autodesk FBX SDK 2020,
-which is distributed under the
-[Autodesk LICENSE AND SERVICES AGREEMENT](https://github.com/godotengine/FBX2glTF/releases/latest/download/FBX-SDK-License.rtf).
-
-**By downloading and using this tool, you agree to the terms of that Autodesk
-proprietary license.**
-
-## Platform binaries
-
-Check the [latest release](https://github.com/godotengine/FBX2glTF/releases/latest/)
-for the last precompiled binaries for Linux, macOS, and Windows.
-
-- Linux x86_64: [`FBX2glTF-linux-x86_64.zip`](https://github.com/godotengine/FBX2glTF/releases/latest/download/FBX2glTF-linux-x86_64.zip)
-  * It is built on Ubuntu 20.04 and requires glibc 2.31 or newer.
-- macOS x86_64: [`FBX2glTF-macos-x86_64.zip`](https://github.com/godotengine/FBX2glTF/releases/latest/download/FBX2glTF-macos-x86_64.zip)
-  * It should work fine for macOS ARM64 too using Rosetta 2.
-- Windows x86_64: [`FBX2glTF-windows-x86_64.zip`](https://github.com/godotengine/FBX2glTF/releases/latest/download/FBX2glTF-windows-x86_64.zip)
-  * [**Requires Microsot Visual C++ Redistributable.**](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist)
-
-There are also artifacts of the latest commit for Linux, macOS, and Windows
-in the [GitHub Actions](https://github.com/godotengine/FBX2glTF/actions) tab.
-
-## Build instructions
-
-Reference the [GitHub workflow](https://github.com/godotengine/FBX2glTF/blob/master/.github/workflows/build.yaml).
+Unlike the original FBX2glTF, **no proprietary Autodesk license applies** — ufbx is fully open-source.
