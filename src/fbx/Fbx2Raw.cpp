@@ -513,14 +513,19 @@ static void ReadMesh(
             (float)ufbxMat->fbx.diffuse_color.value_vec4.y * diffFactor,
             (float)ufbxMat->fbx.diffuse_color.value_vec4.z * diffFactor,
             alpha);
+        // Apply emission_factor to emission_color (factor=0 means no emission)
+        float emFactor = (float)ufbxMat->fbx.emission_factor.value_real;
         Vec3f emissive(
-            (float)ufbxMat->fbx.emission_color.value_vec4.x,
-            (float)ufbxMat->fbx.emission_color.value_vec4.y,
-            (float)ufbxMat->fbx.emission_color.value_vec4.z);
+            (float)ufbxMat->fbx.emission_color.value_vec4.x * emFactor,
+            (float)ufbxMat->fbx.emission_color.value_vec4.y * emFactor,
+            (float)ufbxMat->fbx.emission_color.value_vec4.z * emFactor);
+        // Apply specular_factor to specular_color
+        float specFactor = (float)ufbxMat->fbx.specular_factor.value_real;
+        if (specFactor <= 0.0f) specFactor = 1.0f;
         Vec3f specular(
-            (float)ufbxMat->fbx.specular_color.value_vec4.x,
-            (float)ufbxMat->fbx.specular_color.value_vec4.y,
-            (float)ufbxMat->fbx.specular_color.value_vec4.z);
+            (float)ufbxMat->fbx.specular_color.value_vec4.x * specFactor,
+            (float)ufbxMat->fbx.specular_color.value_vec4.y * specFactor,
+            (float)ufbxMat->fbx.specular_color.value_vec4.z * specFactor);
         float shininess = (float)ufbxMat->fbx.specular_exponent.value_real;
 
         rawMatProps.reset(new RawTraditionalMatProps(
