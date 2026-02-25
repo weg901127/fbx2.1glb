@@ -16,6 +16,7 @@
 #include <cmath>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <map>
 #include <set>
 #include <string>
@@ -185,7 +186,7 @@ static void ReadNodeHierarchy(
     const long parentId,
     const std::string& path) {
   const long nodeId = (long)node->element.element_id;
-  const char* nodeName = node->name.length > 0 ? node->name.data : "unnamed";
+  const char* nodeName = node->name.length > 0 ? node->name.data : "RootNode";
 
   const int nodeIndex = raw.AddNode(nodeId, nodeName, parentId, -1);
   RawNode& rawNode = raw.GetNode(nodeIndex);
@@ -202,7 +203,7 @@ static void ReadNodeHierarchy(
   rawNode.rotation = toQuatf(lt.rotation);
   rawNode.scale = toVec3f(lt.scale);
 
-  if (parentId) {
+  if (parentId >= 0) {
     int parentIdx = raw.GetNodeById(parentId);
     if (parentIdx >= 0) {
       RawNode& parentNode = raw.GetNode(parentIdx);
@@ -340,6 +341,9 @@ static void ReadMesh(
   // Allocate triangulation buffer
   std::vector<uint32_t> triIndices(mesh->max_face_triangles * 3);
 
+  // Track which materials have been logged to avoid per-face spam
+  std::set<long> loggedMaterials;
+
   // Iterate over faces, triangulate, and emit vertices/triangles
   for (size_t fi = 0; fi < mesh->num_faces; fi++) {
     ufbx_face face = mesh->faces.data[fi];
@@ -376,45 +380,113 @@ static void ReadMesh(
     } else {
       materialName = ufbxStr(ufbxMat->name);
       materialId = (long)ufbxMat->element.element_id;
+      bool shouldLog = verboseOutput && loggedMaterials.find(materialId) == loggedMaterials.end();
+      if (shouldLog) loggedMaterials.insert(materialId);
 
       auto maybeAddTexture = [&](const ufbx_material_map& map, RawTextureUsage usage) {
-        if (map.texture && map.texture->type == UFBX_TEXTURE_FILE) {
-          std::string texName = ufbxStr(map.texture->name);
-          std::string texFileName = ufbxStr(map.texture->filename);
-          std::string texFileLoc = FindTextureFile(
-              ufbxStr(map.texture->absolute_filename), fbxFolder, textureExtensions);
-          if (texFileLoc.empty()) {
-            texFileLoc = FindTextureFile(
-                ufbxStr(map.texture->relative_filename), fbxFolder, textureExtensions);
+        if (!map.texture) return;
+        ufbx_texture* tex = map.texture;
+        std::string texName = ufbxStr(tex->name);
+        std::string texFileName = ufbxStr(tex->filename);
+        std::string texFileLoc;
+
+        // Handle embedded textures (content stored inside the FBX file)
+        if (tex->content.size > 0) {
+          namespace fs = std::filesystem;
+          std::string embeddedName = texFileName.empty()
+              ? texName : fs::path(texFileName).filename().string();
+          if (embeddedName.empty()) {
+            embeddedName = "embedded_" + std::to_string(tex->typed_id) + ".png";
           }
-          if (texFileLoc.empty()) {
-            texFileLoc = FindTextureFile(texFileName, fbxFolder, textureExtensions);
+          std::string embeddedPath = fbxFolder + "/" + embeddedName;
+          if (!fs::exists(embeddedPath)) {
+            std::ofstream ofs(embeddedPath, std::ios::binary);
+            if (ofs.is_open()) {
+              ofs.write((const char*)tex->content.data, tex->content.size);
+              ofs.close();
+              if (shouldLog) {
+                fmt::printf("  extracted embedded texture: %s (%zu bytes)\n",
+                    embeddedPath.c_str(), tex->content.size);
+              }
+            }
           }
-          textures[usage] = raw.AddTexture(texName, texFileName, texFileLoc, usage);
+          texFileLoc = fs::absolute(embeddedPath).string();
         }
+
+        // Try to find texture file on disk
+        if (texFileLoc.empty()) {
+          texFileLoc = FindTextureFile(
+              ufbxStr(tex->absolute_filename), fbxFolder, textureExtensions);
+        }
+        if (texFileLoc.empty()) {
+          texFileLoc = FindTextureFile(
+              ufbxStr(tex->relative_filename), fbxFolder, textureExtensions);
+        }
+        if (texFileLoc.empty()) {
+          texFileLoc = FindTextureFile(texFileName, fbxFolder, textureExtensions);
+        }
+
+        if (shouldLog) {
+          fmt::printf("  texture [%s]: name='%s' file='%s' loc='%s' type=%d embedded=%s\n",
+              Describe(usage).c_str(),
+              texName.c_str(), texFileName.c_str(),
+              texFileLoc.empty() ? "(not found)" : texFileLoc.c_str(),
+              (int)tex->type,
+              tex->content.size > 0 ? "yes" : "no");
+        }
+
+        textures[usage] = raw.AddTexture(texName, texFileName, texFileLoc, usage);
       };
 
-      // Detect PBR vs traditional based on shader type
-      if (ufbxMat->shader_type == UFBX_SHADER_UNKNOWN &&
-          (StringUtils::CompareNoCase(ufbxStr(ufbxMat->shading_model_name), "lambert") == 0 ||
-           StringUtils::CompareNoCase(ufbxStr(ufbxMat->shading_model_name), "phong") == 0 ||
-           StringUtils::CompareNoCase(ufbxStr(ufbxMat->shading_model_name), "blinn") == 0 ||
-           StringUtils::CompareNoCase(ufbxStr(ufbxMat->shading_model_name), "constant") == 0)) {
-        // Traditional FBX material
-        RawShadingModel shadingModel;
-        std::string modelName = ufbxStr(ufbxMat->shading_model_name);
-        if (StringUtils::CompareNoCase(modelName, "lambert") == 0) {
-          shadingModel = RAW_SHADING_MODEL_LAMBERT;
-        } else if (StringUtils::CompareNoCase(modelName, "blinn") == 0) {
-          shadingModel = RAW_SHADING_MODEL_BLINN;
-        } else if (StringUtils::CompareNoCase(modelName, "phong") == 0) {
-          shadingModel = RAW_SHADING_MODEL_PHONG;
-        } else if (StringUtils::CompareNoCase(modelName, "constant") == 0) {
-          shadingModel = RAW_SHADING_MODEL_CONSTANT;
-        } else {
-          shadingModel = RAW_SHADING_MODEL_UNKNOWN;
-        }
+      // Detect traditional FBX material by shader type
+      bool isFbxTraditional = false;
+      RawShadingModel shadingModel = RAW_SHADING_MODEL_UNKNOWN;
 
+      switch (ufbxMat->shader_type) {
+        case UFBX_SHADER_FBX_LAMBERT:
+          isFbxTraditional = true;
+          shadingModel = RAW_SHADING_MODEL_LAMBERT;
+          break;
+        case UFBX_SHADER_FBX_PHONG:
+        case UFBX_SHADER_BLENDER_PHONG:
+          isFbxTraditional = true;
+          shadingModel = RAW_SHADING_MODEL_PHONG;
+          break;
+        case UFBX_SHADER_WAVEFRONT_MTL:
+          isFbxTraditional = true;
+          shadingModel = RAW_SHADING_MODEL_PHONG;
+          break;
+        case UFBX_SHADER_UNKNOWN: {
+          std::string modelName = ufbxStr(ufbxMat->shading_model_name);
+          if (StringUtils::CompareNoCase(modelName, "lambert") == 0) {
+            isFbxTraditional = true;
+            shadingModel = RAW_SHADING_MODEL_LAMBERT;
+          } else if (StringUtils::CompareNoCase(modelName, "blinn") == 0) {
+            isFbxTraditional = true;
+            shadingModel = RAW_SHADING_MODEL_BLINN;
+          } else if (StringUtils::CompareNoCase(modelName, "phong") == 0) {
+            isFbxTraditional = true;
+            shadingModel = RAW_SHADING_MODEL_PHONG;
+          } else if (StringUtils::CompareNoCase(modelName, "constant") == 0) {
+            isFbxTraditional = true;
+            shadingModel = RAW_SHADING_MODEL_CONSTANT;
+          }
+          break;
+        }
+        default:
+          break;
+      }
+
+      if (shouldLog) {
+        fmt::printf("  material '%s': shader_type=%d shading_model='%s' -> %s\n",
+            materialName.c_str(),
+            (int)ufbxMat->shader_type,
+            ufbxStr(ufbxMat->shading_model_name).c_str(),
+            isFbxTraditional ? "traditional" : "PBR");
+      }
+
+      if (isFbxTraditional) {
+        // Traditional FBX material (Lambert, Phong, Blinn, etc.)
         maybeAddTexture(ufbxMat->fbx.diffuse_color, RAW_TEXTURE_USAGE_DIFFUSE);
         maybeAddTexture(ufbxMat->fbx.normal_map, RAW_TEXTURE_USAGE_NORMAL);
         maybeAddTexture(ufbxMat->fbx.emission_color, RAW_TEXTURE_USAGE_EMISSIVE);
@@ -425,11 +497,22 @@ static void ReadMesh(
             (float)ufbxMat->fbx.ambient_color.value_vec4.x,
             (float)ufbxMat->fbx.ambient_color.value_vec4.y,
             (float)ufbxMat->fbx.ambient_color.value_vec4.z);
+        // FBX transparency: actual opacity = 1 - (transparency_color_luminance * transparency_factor)
+        // transparency_color=(0,0,0) means opaque regardless of transparency_factor
+        float transFactor = (float)ufbxMat->fbx.transparency_factor.value_real;
+        float transColorLum = (float)(
+            ufbxMat->fbx.transparency_color.value_vec4.x * 0.2126 +
+            ufbxMat->fbx.transparency_color.value_vec4.y * 0.7152 +
+            ufbxMat->fbx.transparency_color.value_vec4.z * 0.0722);
+        float alpha = 1.0f - (transColorLum * transFactor);
+        // Apply diffuse_factor to diffuse_color (e.g., factor=0.8 * color=1.0 -> 0.8)
+        float diffFactor = (float)ufbxMat->fbx.diffuse_factor.value_real;
+        if (diffFactor <= 0.0f) diffFactor = 1.0f; // guard against missing/zero factor
         Vec4f diffuse(
-            (float)ufbxMat->fbx.diffuse_color.value_vec4.x,
-            (float)ufbxMat->fbx.diffuse_color.value_vec4.y,
-            (float)ufbxMat->fbx.diffuse_color.value_vec4.z,
-            1.0f - (float)ufbxMat->fbx.transparency_factor.value_real);
+            (float)ufbxMat->fbx.diffuse_color.value_vec4.x * diffFactor,
+            (float)ufbxMat->fbx.diffuse_color.value_vec4.y * diffFactor,
+            (float)ufbxMat->fbx.diffuse_color.value_vec4.z * diffFactor,
+            alpha);
         Vec3f emissive(
             (float)ufbxMat->fbx.emission_color.value_vec4.x,
             (float)ufbxMat->fbx.emission_color.value_vec4.y,
@@ -448,13 +531,21 @@ static void ReadMesh(
             std::move(specular),
             shininess));
       } else {
-        // PBR material (any other shader type, or autodetect)
+        // PBR material (Arnold, OSL, glTF, 3dsMax PBR, etc.)
         maybeAddTexture(ufbxMat->pbr.base_color, RAW_TEXTURE_USAGE_ALBEDO);
         maybeAddTexture(ufbxMat->pbr.normal_map, RAW_TEXTURE_USAGE_NORMAL);
         maybeAddTexture(ufbxMat->pbr.emission_color, RAW_TEXTURE_USAGE_EMISSIVE);
         maybeAddTexture(ufbxMat->pbr.roughness, RAW_TEXTURE_USAGE_ROUGHNESS);
         maybeAddTexture(ufbxMat->pbr.metalness, RAW_TEXTURE_USAGE_METALLIC);
         maybeAddTexture(ufbxMat->pbr.ambient_occlusion, RAW_TEXTURE_USAGE_OCCLUSION);
+
+        // Fallback: if no albedo texture found via PBR maps, try FBX diffuse
+        if (textures[RAW_TEXTURE_USAGE_ALBEDO] < 0 && ufbxMat->fbx.diffuse_color.texture) {
+          maybeAddTexture(ufbxMat->fbx.diffuse_color, RAW_TEXTURE_USAGE_ALBEDO);
+        }
+        if (textures[RAW_TEXTURE_USAGE_NORMAL] < 0 && ufbxMat->fbx.normal_map.texture) {
+          maybeAddTexture(ufbxMat->fbx.normal_map, RAW_TEXTURE_USAGE_NORMAL);
+        }
 
         Vec4f baseColor(
             (float)ufbxMat->pbr.base_color.value_vec4.x,
@@ -945,7 +1036,7 @@ bool LoadFBXFile(
   ufbx_load_opts ufbx_opts = {};
   ufbx_opts.target_axes = ufbx_axes_right_handed_y_up;
   ufbx_opts.target_unit_meters = 1.0f;
-  ufbx_opts.space_conversion = UFBX_SPACE_CONVERSION_TRANSFORM_ROOT;
+  ufbx_opts.space_conversion = UFBX_SPACE_CONVERSION_MODIFY_GEOMETRY;
   ufbx_opts.generate_missing_normals = true;
 
   ufbx_error error;
@@ -973,7 +1064,8 @@ bool LoadFBXFile(
   if (fbxFolder.empty()) fbxFolder = ".";
 
   // Phase 1: Read node hierarchy (transforms + parent/child)
-  ReadNodeHierarchy(raw, scene, scene->root_node, 0, "");
+  // Pass -1 as sentinel for "no parent" since element_id 0 is valid
+  ReadNodeHierarchy(raw, scene, scene->root_node, -1, "");
 
   // Phase 2: Read node attributes (meshes, cameras, lights)
   ReadNodeAttributes(raw, scene, scene->root_node, fbxFolder, textureExtensions);
